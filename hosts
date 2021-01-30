@@ -1,0 +1,7 @@
+[VAGRANTHOST]
+<SRV_IP>
+
+[VAGRANTHOST:vars]
+ansible_ssh_pass='<SRV_PASS>'
+ansible_ssh_user='<SRV_USER>'
+ansible_ssh_port='22'

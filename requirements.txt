@@ -1,0 +1,13 @@
+gnureadline
+uncompyle6
+autopep8
+pexpect
+keyboard
+pytest
+pytest-html
+pytest-cov
+pytest-mock
+coverage
+python-gitlab
+pyinstaller
+

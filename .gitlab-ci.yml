@@ -1,0 +1,153 @@
+variables:
+  sut_ip: "10.99.104.251"
+  reference: "vmsetup.msg"
+  script_cmd: "'bash vagrant-setup.sh -h'"
+
+.normal: &normal
+  before_script:
+    - chmod 755 *.sh *.py || true
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" "$CI_REGISTRY" --password-stdin
+  after_script:
+    - docker logout
+  tags:
+    - IPT-K8S-NODE2
+
+.tool: &tool
+  before_script:
+    - apk add --update curl git && rm -rf /var/cache/apk/* || true 
+    - git clone $TOOLS_PROJECT
+  tags:
+    - IPT-K8S-NODE2
+
+stages:
+  - lintcheck
+  - deployvm
+  - release
+  - cleanup
+
+codeReview:Shell:
+  <<: *normal
+  stage: lintcheck
+  image: registry.ipt-gitlab:8081/sit-develop-tool/shellcheck:$SHCHECK_VER
+  before_script:
+    - echo "Starting Shell coding style verification."
+  script:
+    - find . -iname "*.sh" | xargs shellcheck -s bash --color=always || true
+  after_script:
+    - echo "Finish coding style verification."
+  tags:
+    - IPT-K8S-NODE2
+  when: always
+
+vmDeployment:
+  <<: *normal
+  stage: deployvm
+  image: registry.ipt-gitlab:8081/sit-develop-tool/tool-ansible:$ANSIBLE_VER
+  before_script:
+    - |
+        export VERSION=$(egrep -o 'Rev\:\ ([0-9].){2}[0-9]+' README.md | awk '{print $NF}')
+
+        # print Group variables
+        more << EOF
+        Show Group variables:
+        ===========================================================================
+        EXE_PATH: $EXE_PATH
+        WORK_PATH: $WORK_PATH
+        SUT_IP: $sut_ip
+        VERSION: $VERSION
+        ===========================================================================
+        EOF
+
+        if [ -f ${PWD}/hosts ]; then
+           export host_conf=hosts
+        else
+           export host_conf=inventory
+        fi
+
+        # configure hosts (replace ";" to "\n")
+        sed -i "s,<SRV_USER>,${SRV_USER},g" ${PWD}/$host_conf
+        sed -i "s,<SRV_PASS>,${SRV_PASS},g" ${PWD}/$host_conf
+        sed -i "s,<SRV_IP>,${sut_ip},g" ${PWD}/$host_conf
+        sed -i -E "s,\;,\n,g" ${PWD}/$host_conf
+  script:
+    - |
+        ansible "*" -i ${PWD}/$host_conf -m shell -a "mkdir -p $WORK_PATH" -b
+        ansible "*" -i ${PWD}/$host_conf -m shell -a "rm -rf $EXE_PATH" -b
+        ansible "*" -i ${PWD}/$host_conf -m copy  -a "src=$PWD dest=$WORK_PATH owner=$SRV_USER group=$SRV_USER" -b
+        ansible "*" -i ${PWD}/$host_conf -m shell -a "cd $EXE_PATH && chmod 755 *.sh" || true
+
+        # wait for test done
+        more << EOF
+        ===========================================================================
+        Starting run test script on each SUT...
+         - Run time: $(date '+[%F %T]')
+         - Run command as below:
+            - ${script_cmd}
+        ===========================================================================
+        EOF
+        ansible "*" -i ${PWD}/$host_conf -m shell -a "cd $EXE_PATH && bash -c ${script_cmd}" -b
+  after_script:
+    - |
+        if [ -f ${PWD}/hosts ]; then
+           export host_conf=hosts
+        else
+           export host_conf=inventory
+        fi
+
+        # generate artifacts in each host
+        for e in $(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' $host_conf)
+        do
+            ansible "*" -i ${PWD}/$host_conf -m shell -a "cd $EXE_PATH && tar zcvf reports.tar.gz reports/" \
+                        -b
+            ansible "*" -i ${PWD}/$host_conf -m fetch -a "dest=$PWD src=${EXE_PATH}/reports.tar.gz" \
+                        -b
+            mv ${e}/${EXE_PATH}/reports.tar.gz . \
+               && tar zxvf reports.tar.gz \
+               && rm -f reports.tar.gz
+            if [ -d $e ]; then
+                rm -rf $e
+            fi
+            mkdir ${e}-Report && mv reports ${e}-Report/test-logs
+        done
+
+        # collect logs and clear scripts
+        ansible "*" -i ${PWD}/$host_conf -m shell -a "rm -rf $EXE_PATH" \
+                    -b
+        # save console output to log in each host
+        for e in $(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' $host_conf)
+        do
+            curl -s --location ${CI_JOB_URL}/raw > ${e}-Report/console.log
+            sed -i -r 's/'$(echo -e "\033")'\[[0-9]{1,2}(;([0-9]{1,2})?)?[mK]|\r//g' ${e}-Report/console.log
+        done
+  artifacts:
+    name: ${CI_PROJECT_NAME}-Reports
+    expire_in: 4d
+    when: on_success
+    paths:
+      - ${PWD}/*.*.*.*-Report
+  tags:
+    - IPT-K8S-NODE2
+  when: always
+  allow_failure: true
+
+Release:
+  <<: *tool
+  stage: release
+  script:
+    - sh tool-gitlab-deployment/pipeline_mail.sh
+  tags:
+    - IPT-K8S-NODE2
+  only:
+    - triggers
+    - schedules
+  except:
+    - pushes
+
+cleanEnv:
+  <<: *tool
+  stage: cleanup
+  script:
+    - sh tool-gitlab-deployment/pipeline_clean.sh
+  tags:
+    - IPT-K8S-NODE2
+  when: always
